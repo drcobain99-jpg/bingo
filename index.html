@@ -125,6 +125,13 @@ input{font:inherit;-webkit-user-select:text;user-select:text}
   font-size:calc(var(--w) / var(--n) * var(--f,.34));padding:0;color:var(--ink);outline:none;-webkit-appearance:none;appearance:none}
 .fillgrid input:focus{border-color:var(--blue);background:#F0F6FF}
 .fillgrid input.dup{border-color:var(--red);background:#FFE9E6}
+.fillgrid input{touch-action:none} /* 칸 위에서 끌 때 화면이 스크롤되지 않게 */
+.fillgrid input.dragsrc{opacity:.3;border-style:dashed;border-color:var(--blue)}
+.fillgrid input.over{border-color:var(--blue);background:#DCEBFF;transform:scale(1.07);transition:transform .1s}
+.fillgrid input.swapped{animation:pop .45s cubic-bezier(.3,1.6,.5,1)}
+.dragghost{position:fixed;left:0;top:0;z-index:80;pointer-events:none;display:grid;place-items:center;text-align:center;line-height:1;
+  background:#fff;border:3px solid var(--blue);border-radius:10px;color:var(--ink);box-shadow:0 14px 28px rgba(0,0,0,.28);will-change:transform}
+body.dragging,body.dragging *{cursor:grabbing!important;-webkit-user-select:none!important;user-select:none!important}
 .fillgrid input:disabled{background:#F3EDE2;color:var(--ink);opacity:1;-webkit-text-fill-color:var(--ink)}
 .fmsg{text-align:center;font-size:15px;min-height:22px;margin:8px 0 4px;color:var(--mute)}
 .fmsg.bad{color:var(--red)} .fmsg.good{color:var(--green)}
@@ -455,10 +462,21 @@ const Snd = {
         const o = this.ctx.createOscillator(), g = this.ctx.createGain(); g.gain.value = 0.0001;
         o.connect(g).connect(this.out); o.start(); o.stop(this.ctx.currentTime + 0.02);
       }
-      if (this.ctx.state === 'suspended') this.ctx.resume();
+      if (this.ctx.state !== 'running') { const r = this.ctx.resume(); if (r && r.catch) r.catch(() => {}); } // 'interrupted'(iOS)도 다시 깨움
+      // iOS Safari: 터치 안에서 아주 짧은 무음을 재생해야 확실히 소리가 풀림
+      const src = this.ctx.createBufferSource(); src.buffer = this.ctx.createBuffer(1, 1, 22050); src.connect(this.ctx.destination); src.start(0);
+      this.session();
     } catch (e) {}
   },
+  // 아이폰 무음 스위치가 켜져 있어도 게임 소리가 나도록 (앱의 🔇 버튼으로 끌 수 있음)
+  session() { try { if (navigator.audioSession) navigator.audioSession.type = this.on ? 'playback' : 'auto'; } catch (e) {} },
   ok() { return this.on && this.ctx && this.ctx.state === 'running'; },
+  // 소리 내기: 오디오가 잠시 멈춰 있으면 다시 깨운 뒤 재생
+  run(fn) {
+    if (!this.on || !this.ctx) return;
+    if (this.ctx.state === 'running') { try { fn(this.ctx.currentTime + 0.01); } catch (e) {} return; }
+    try { this.ctx.resume().then(() => { if (this.ctx.state === 'running') try { fn(this.ctx.currentTime + 0.01); } catch (e) {} }).catch(() => {}); } catch (e) {}
+  },
   burst(t, f, q, peak, dec, type = 'bandpass') {
     const c = this.ctx, s = c.createBufferSource(); s.buffer = this.nb;
     const fl = c.createBiquadFilter(); fl.type = type; fl.frequency.value = f; fl.Q.value = q;
@@ -473,25 +491,27 @@ const Snd = {
     o.connect(g).connect(this.out); o.start(t); o.stop(t + dec + 0.05);
   },
   slap() { // "탁!" — 두꺼운 종이가 바닥을 때리는 소리
-    if (!this.ok()) return;
-    const t = this.ctx.currentTime + 0.01;
-    this.burst(t, 1400, 0.8, 1.0, 0.11);
-    this.burst(t, 4200, 1.2, 0.55, 0.035, 'highpass');
-    this.thump(t, 150, 48, 0.95, 0.18);
-    this.burst(t + 0.055, 1100, 1.0, 0.18, 0.06); // 종이가 들썩이며 한 번 더
+    this.run(t => {
+      this.burst(t, 1400, 0.8, 1.0, 0.11);
+      this.burst(t, 4200, 1.2, 0.55, 0.035, 'highpass');
+      this.thump(t, 150, 48, 0.95, 0.18);
+      this.burst(t + 0.055, 1100, 1.0, 0.18, 0.06); // 종이가 들썩이며 한 번 더
+    });
   },
+  tick() { this.run(t => { this.burst(t, 2600, 2, 0.35, 0.03); this.tone(t, 1250, 0.07, 0.08, 'sine'); }); }, // 칸 고를 때
   tone(t, f, dur, vol = 0.18, type = 'triangle') {
     const c = this.ctx, o = c.createOscillator(), g = c.createGain();
     o.type = type; o.frequency.value = f;
     g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     o.connect(g).connect(this.out); o.start(t); o.stop(t + dur + 0.05);
   },
-  ding() { if (!this.ok()) return; const t = this.ctx.currentTime + 0.01; this.tone(t, 1320, 0.25, 0.12, 'sine'); this.tone(t + 0.07, 1760, 0.3, 0.1, 'sine'); },
-  myturn() { if (!this.ok()) return; const t = this.ctx.currentTime + 0.01; this.tone(t, 660, 0.15, 0.12); this.tone(t + 0.12, 880, 0.2, 0.12); },
-  line() { if (!this.ok()) return; const t = this.ctx.currentTime + 0.01; [784, 988, 1175].forEach((f, i) => this.tone(t + i * 0.08, f, 0.22, 0.14)); },
-  fanfare() { if (!this.ok()) return; const t = this.ctx.currentTime + 0.02; [523, 659, 784, 1047, 784, 1047].forEach((f, i) => this.tone(t + i * 0.11, f, i === 5 ? 0.6 : 0.2, 0.16, 'square')); }
+  ding() { this.run(t => { this.tone(t, 1320, 0.25, 0.12, 'sine'); this.tone(t + 0.07, 1760, 0.3, 0.1, 'sine'); }); },
+  myturn() { this.run(t => { this.tone(t, 660, 0.15, 0.12); this.tone(t + 0.12, 880, 0.2, 0.12); }); },
+  line() { this.run(t => { [784, 988, 1175].forEach((f, i) => this.tone(t + i * 0.08, f, 0.22, 0.14)); }); },
+  fanfare() { this.run(t => { [523, 659, 784, 1047, 784, 1047].forEach((f, i) => this.tone(t + 0.01 + i * 0.11, f, i === 5 ? 0.6 : 0.2, 0.16, 'square')); }); }
 };
-['pointerdown', 'touchend', 'keydown'].forEach(ev => document.addEventListener(ev, () => Snd.unlock(), { passive: true }));
+['pointerdown', 'pointerup', 'touchend', 'click', 'keydown'].forEach(ev => document.addEventListener(ev, () => Snd.unlock(), { passive: true, capture: true }));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Snd.ctx && Snd.ctx.state !== 'running') Snd.run(() => {}); });
 const buzz = p => { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} };
 
 /* ---------- 화면 꺼짐 방지 ---------- */
@@ -541,7 +561,7 @@ const netHTML = () => `<span class="net ${netState !== 'ok' ? 'bad' : ''}"><i></
 const sndBtn = () => `<button class="icon" data-act="sound" aria-label="소리">${Snd.on ? '🔊' : '🔇'}</button>`;
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-act="sound"]'); if (!b) return;
-  Snd.on = !Snd.on; LS.set('kb-sound', Snd.on); $$('[data-act="sound"]').forEach(x => x.textContent = Snd.on ? '🔊' : '🔇');
+  Snd.on = !Snd.on; LS.set('kb-sound', Snd.on); Snd.session(); $$('[data-act="sound"]').forEach(x => x.textContent = Snd.on ? '🔊' : '🔇');
   if (Snd.on) { Snd.unlock(); setTimeout(() => Snd.slap(), 30); }
 });
 
@@ -1117,7 +1137,7 @@ function mountFill() {
   <div class="scr fill">
     <div class="top"><div class="t">내 게임판 채우기</div>${netHTML()}${sndBtn()}</div>
     <div class="scroll" style="flex:1"><div class="fillbox" style="--n:${N}">
-      <p class="hint center" style="margin:0 0 6px">${N}×${N} · <b style="color:var(--ink);font-weight:normal">${s.L}줄</b> 먼저 완성하면 승리 · ${s.mode === 'pick' ? '✋ 직접 고르기' : '🎲 뽑기'}${s.view === 'mine' ? ' · 🔒 내 판만 보기' : ''}${s.auto ? ` · ⏳ ${s.iv}초 자동` : ''}<br>숫자/글자 모두 OK (같은 값은 한 번만)</p>
+      <p class="hint center" style="margin:0 0 6px">${N}×${N} · <b style="color:var(--ink);font-weight:normal">${s.L}줄</b> 먼저 완성하면 승리 · ${s.mode === 'pick' ? '✋ 직접 고르기' : '🎲 뽑기'}${s.view === 'mine' ? ' · 🔒 내 판만 보기' : ''}${s.auto ? ` · ⏳ ${s.iv}초 자동` : ''}<br>숫자/글자 모두 OK (같은 값은 한 번만) · 칸을 끌어다 놓으면 자리가 바뀌어요</p>
       <div class="fillgrid" id="fg">${draft.map((v, i) => `<input data-i="${i}" maxlength="${CELL_MAX}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="next" inputmode="${numPad ? 'numeric' : 'text'}" aria-label="${i + 1}번 칸">`).join('')}</div>
       <div class="fmsg" id="fmsg"></div>
       <div class="tools">
@@ -1138,6 +1158,11 @@ function mountFill() {
   });
   $('#fg').addEventListener('keydown', e => {
     if (e.key === 'Enter') { e.preventDefault(); const i = +e.target.dataset.i; const nx = ins[(i + 1) % ins.length]; if (i + 1 < ins.length) nx.focus(); else e.target.blur(); }
+  });
+  bindCellDrag($('#fg'), ins, (a, b) => {
+    [draft[a], draft[b]] = [draft[b], draft[a]];
+    [a, b].forEach(i => { ins[i].value = draft[i]; fitIn(ins[i]); ins[i].classList.remove('swapped'); void ins[i].offsetWidth; ins[i].classList.add('swapped'); });
+    save(); validateFill();
   });
   $('.tools').addEventListener('click', e => {
     const b = e.target.closest('[data-t]'); if (!b || meP().ready) return;
@@ -1162,6 +1187,59 @@ function mountFill() {
   if (host) $('#back').onclick = async () => { if (await ask('대기실로 돌아갈까요? 채운 판은 다시 써야 해요.', '돌아가기')) hostCmd.toLobby(); };
   else $('#leave').onclick = guestLeave;
   validateFill();
+}
+// 칸 끌어서 자리 바꾸기: 손가락(또는 마우스)을 8px 이상 움직이면 끌기 시작, 다른 칸 위에서 놓으면 두 칸을 맞바꿈
+function bindCellDrag(grid, ins, onSwap) {
+  let d = null;
+  const cellAt = (x, y) => { const el = document.elementFromPoint(x, y); const c = el && el.closest ? el.closest('#fg input') : null; return c && grid.contains(c) ? +c.dataset.i : null; };
+  const clearOver = () => ins.forEach(x => x.classList.remove('over'));
+  const end = (e, cancel) => {
+    if (!d || (e && e.pointerId !== d.id)) return;
+    window.removeEventListener('pointermove', move, true);
+    window.removeEventListener('pointerup', up, true);
+    window.removeEventListener('pointercancel', cancelH, true);
+    const st = d; d = null;
+    if (!st.on) return;
+    if (e) e.preventDefault();
+    st.ghost.remove(); ins[st.from].classList.remove('dragsrc'); clearOver();
+    document.body.classList.remove('dragging');
+    // 끌기 직후 생기는 클릭(입력칸 포커스)은 무시
+    const stop = ev => { ev.preventDefault(); ev.stopPropagation(); window.removeEventListener('click', stop, true); };
+    window.addEventListener('click', stop, true); setTimeout(() => window.removeEventListener('click', stop, true), 250);
+    if (!cancel && st.over != null && st.over !== st.from) { onSwap(st.from, st.over); Snd.tick(); buzz(12); }
+  };
+  const up = e => end(e, false), cancelH = e => end(e, true);
+  const move = e => {
+    if (!d || e.pointerId !== d.id) return;
+    const dx = e.clientX - d.x0, dy = e.clientY - d.y0;
+    if (!d.on) {
+      if (Math.hypot(dx, dy) < 8) return;
+      d.on = true;
+      const src = ins[d.from], r = src.getBoundingClientRect();
+      src.blur(); try { window.getSelection().removeAllRanges(); } catch (_) {}
+      const g = document.createElement('div'); g.className = 'dragghost';
+      g.textContent = src.value; g.style.width = r.width + 'px'; g.style.height = r.height + 'px';
+      g.style.fontSize = getComputedStyle(src).fontSize;
+      document.body.appendChild(g); d.ghost = g; d.w = r.width; d.h = r.height;
+      src.classList.add('dragsrc'); document.body.classList.add('dragging');
+      Snd.tick(); buzz(8);
+    }
+    e.preventDefault();
+    // 손가락에 가리지 않게 끌리는 칸은 손가락 조금 위에 띄움 (놓을 자리는 손가락 위치 기준으로 파랗게 표시)
+    d.ghost.style.transform = `translate(${e.clientX - d.w / 2}px,${e.clientY - d.h / 2 - d.h * d.lift}px) rotate(-4deg) scale(1.08)`;
+    const t = cellAt(e.clientX, e.clientY);
+    if (t !== d.over) { clearOver(); d.over = t; if (t != null && t !== d.from) ins[t].classList.add('over'); }
+  };
+  grid.addEventListener('pointerdown', e => {
+    const inp = e.target.closest('input');
+    if (d) end(null, true); // 이전 끌기가 손가락을 뗀 신호 없이 남아 있으면 정리
+    if (!inp || inp.disabled || (meP() && meP().ready)) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    d = { from: +inp.dataset.i, id: e.pointerId, x0: e.clientX, y0: e.clientY, on: false, over: null, lift: e.pointerType === 'mouse' ? 0 : .6 };
+    window.addEventListener('pointermove', move, { capture: true, passive: false });
+    window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', cancelH, true);
+  });
 }
 function validateFill(loud) {
   const ins = $$('#fg input'); if (!ins.length) return false;
@@ -1231,7 +1309,7 @@ function mountPlay() {
     const c = e.target.closest('.panel.picking .c.pk'); if (!c) return;
     const i = +c.dataset.i; Snd.unlock();
     if (pickSel === i) { sendPick(); return; }
-    pickSel = i; buzz(8); renderBoards(null); renderBar();
+    pickSel = i; buzz(8); Snd.tick(); renderBoards(null); renderBar();
   });
   pickSel = null;
   if (s.phase === 'play' && s.draw.seq === seenSeq && !s.called.length) {
@@ -1248,7 +1326,7 @@ function sendPick() {
   if (!myTurnPicking() || pickSel == null || !mine.board || Date.now() < drawLockUntil || Date.now() < animUntil) return;
   const v = mine.board[pickSel];
   if (v == null || S.called.some(x => norm(x) === norm(v))) { pickSel = null; renderBoards(null); renderBar(); return; }
-  drawLockUntil = Date.now() + 1600; buzz(15);
+  drawLockUntil = Date.now() + 1600; Snd.unlock(); buzz(15);
   send({ t: 'pick', v }); renderBar();
 }
 async function playMenu() {
