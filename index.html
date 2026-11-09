@@ -223,6 +223,10 @@ input{font:inherit;-webkit-user-select:text;user-select:text}
 .panel.picking .c.pk{cursor:pointer;outline:2px dashed color-mix(in srgb,var(--pc) 70%,#fff);outline-offset:-3px;animation:pkp 1.3s ease-in-out infinite}
 @keyframes pkp{50%{background:color-mix(in srgb,var(--pc) 14%,#fff)}}
 .panel.picking .c.sel{animation:none;background:color-mix(in srgb,var(--pc) 30%,#fff);outline:3px solid var(--ink);outline-offset:-3px;transform:scale(1.08);position:relative;z-index:1}
+/* 내 판만 보기: 가려진 판 */
+.c.hid{background:repeating-linear-gradient(45deg,color-mix(in srgb,var(--pc) 20%,#fff) 0 6px,color-mix(in srgb,var(--pc) 9%,#fff) 6px 12px);border-color:color-mix(in srgb,var(--pc) 28%,#fff)}
+.lockov{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none}
+.lockov span{background:rgba(255,251,242,.94);border:2px solid var(--pc);border-radius:12px;padding:4px 10px;font-size:clamp(13px,8cqmin,22px);white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.12)}
 /* ddakji overlay */
 .dkwrap{position:fixed;inset:0;display:none;place-items:center;pointer-events:none;z-index:50}
 .dkwrap.show,.dkwrap.out{display:grid}
@@ -587,7 +591,7 @@ function validBoard(cells, N) {
 const H = { bus: null, hid: null, last: new Map(), S: null, autoTimer: null, autoKey: '', lastDrawAt: 0, hb: null, resuming: false, everOpen: false, claiming: false };
 
 function newState(code) {
-  return { v: 1, code, phase: 'lobby', N: 5, L: 5, mode: 'draw', auto: false, iv: 6, deadline: 0, game: 1, players: [], called: [], turn: 0, draw: { seq: 0, value: null, by: null }, ts: Date.now() };
+  return { v: 1, code, phase: 'lobby', N: 5, L: 5, mode: 'draw', view: 'all', auto: false, iv: 6, deadline: 0, game: 1, players: [], called: [], turn: 0, draw: { seq: 0, value: null, by: null }, ts: Date.now() };
 }
 function freeColor(s) { const used = new Set(s.players.map(p => p.color)); for (let i = 0; i < 4; i++) if (!used.has(i)) return i; return 0; }
 function mkPlayer(s, id, name, ai) { return { id, name, ai: !!ai, color: freeColor(s), board: null, ready: false, online: true, rank: null, at: null, lines: 0 }; }
@@ -698,6 +702,7 @@ const hostCmd = {
   setN(d) { const s = H.S; if (s.phase !== 'lobby') return; s.N = clamp(s.N + d, MIN_N, MAX_N); s.L = clamp(s.L, 1, 2 * s.N + 2); hostBroadcast(); },
   setL(d) { const s = H.S; if (s.phase !== 'lobby') return; s.L = clamp(s.L + d, 1, 2 * s.N + 2); hostBroadcast(); },
   setMode(m) { const s = H.S; if (s.phase !== 'lobby') return; s.mode = m === 'pick' ? 'pick' : 'draw'; hostBroadcast(); },
+  setView(v) { const s = H.S; if (s.phase !== 'lobby') return; s.view = v === 'mine' ? 'mine' : 'all'; hostBroadcast(); },
   setAuto(on) { const s = H.S; s.auto = !!on; s.deadline = s.auto && s.phase === 'play' ? Date.now() + s.iv * 1000 : 0; hostBroadcast(); },
   setIv(v) {
     const s = H.S; const nv = clamp(Math.round(+v || 0), IV_MIN, IV_MAX); if (nv === s.iv) return;
@@ -742,6 +747,7 @@ async function hostOpen(resume) {
     H.S.players.forEach(p => { if (!p.ai && p.id !== 'host') p.online = false; });
     const hp = H.S.players.find(p => p.id === 'host'); if (hp) hp.name = me.name || hp.name;
     if (H.S.mode !== 'pick') H.S.mode = 'draw';
+    if (H.S.view !== 'mine') H.S.view = 'all';
     H.S.iv = clamp(+H.S.iv || 6, IV_MIN, IV_MAX); H.S.auto = !!H.S.auto;
     H.S.deadline = H.S.auto && H.S.phase === 'play' ? Date.now() + H.S.iv * 1000 : 0;
   } else {
@@ -986,6 +992,8 @@ function mountLobby() {
         <div class="set"><div class="k">승리 조건<small>먼저 완성하면 이기는 줄 수</small></div><div class="step">${host ? '<button data-c="l-">−</button>' : ''}<b id="vl"></b>${host ? '<button data-c="l+">+</button>' : ''}</div></div>
         <div class="set col"><div class="k">진행 방식<small id="modehint"></small></div>
           <div class="seg" id="segmode"><button data-mode="draw" ${host ? '' : 'disabled'}>🎲 뽑기</button><button data-mode="pick" ${host ? '' : 'disabled'}>✋ 직접 고르기</button></div></div>
+        <div class="set col"><div class="k">게임판 보기<small id="viewhint"></small></div>
+          <div class="seg" id="segview"><button data-view="all" ${host ? '' : 'disabled'}>👀 모두 공개</button><button data-view="mine" ${host ? '' : 'disabled'}>🔒 내 판만</button></div></div>
         <div class="set"><div class="k">자동 진행<small>시간이 지나면 자동으로 골라 줘요</small></div>
           <button class="tog" id="tauto" role="switch" aria-label="자동 진행" ${host ? '' : 'disabled'}><i></i></button></div>
         <div id="ivwrap">
@@ -1010,6 +1018,7 @@ function mountLobby() {
     $('.lobby').addEventListener('click', e => {
       const c = e.target.closest('[data-c]'); if (c) { const m = { 'n-': () => hostCmd.setN(-1), 'n+': () => hostCmd.setN(1), 'l-': () => hostCmd.setL(-1), 'l+': () => hostCmd.setL(1) }; m[c.dataset.c](); return; }
       const md = e.target.closest('[data-mode]'); if (md) { hostCmd.setMode(md.dataset.mode); return; }
+      const vw = e.target.closest('[data-view]'); if (vw) { hostCmd.setView(vw.dataset.view); return; }
       if (e.target.closest('#tauto')) { hostCmd.setAuto(!S.auto); return; }
       const r = e.target.closest('[data-rm]'); if (r) hostCmd.remove(r.dataset.rm);
     });
@@ -1080,6 +1089,9 @@ function updLobby() {
   const pick = s.mode === 'pick';
   $$('#segmode [data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === (pick ? 'pick' : 'draw')));
   $('#modehint').textContent = pick ? '내 차례에 내 판에서 부를 칸을 직접 골라요 (AI도 스스로 골라요)' : '내 차례에 뽑기를 누르면 모든 판의 값 중 하나가 무작위로 나와요';
+  const mineOnly = s.view === 'mine';
+  $$('#segview [data-view]').forEach(b => b.classList.toggle('on', b.dataset.view === (mineOnly ? 'mine' : 'all')));
+  $('#viewhint').textContent = mineOnly ? '게임 중에는 각자 자기 판만 보여요. 다른 사람은 줄 수만 보이고, 게임이 끝나면 모두 공개돼요' : '게임 중에 모든 사람의 판이 보여요';
   $('#tauto').classList.toggle('on', !!s.auto); $('#tauto').setAttribute('aria-checked', s.auto ? 'true' : 'false');
   $('#ivwrap').style.display = s.auto ? '' : 'none';
   if (!ivDragging) setIvUI($('#ivbar'), s.iv);
@@ -1105,7 +1117,7 @@ function mountFill() {
   <div class="scr fill">
     <div class="top"><div class="t">내 게임판 채우기</div>${netHTML()}${sndBtn()}</div>
     <div class="scroll" style="flex:1"><div class="fillbox" style="--n:${N}">
-      <p class="hint center" style="margin:0 0 6px">${N}×${N} · <b style="color:var(--ink);font-weight:normal">${s.L}줄</b> 먼저 완성하면 승리 · ${s.mode === 'pick' ? '✋ 직접 고르기' : '🎲 뽑기'}${s.auto ? ` · ⏳ ${s.iv}초 자동` : ''}<br>숫자/글자 모두 OK (같은 값은 한 번만)</p>
+      <p class="hint center" style="margin:0 0 6px">${N}×${N} · <b style="color:var(--ink);font-weight:normal">${s.L}줄</b> 먼저 완성하면 승리 · ${s.mode === 'pick' ? '✋ 직접 고르기' : '🎲 뽑기'}${s.view === 'mine' ? ' · 🔒 내 판만 보기' : ''}${s.auto ? ` · ⏳ ${s.iv}초 자동` : ''}<br>숫자/글자 모두 OK (같은 값은 한 번만)</p>
       <div class="fillgrid" id="fg">${draft.map((v, i) => `<input data-i="${i}" maxlength="${CELL_MAX}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="next" inputmode="${numPad ? 'numeric' : 'text'}" aria-label="${i + 1}번 칸">`).join('')}</div>
       <div class="fmsg" id="fmsg"></div>
       <div class="tools">
@@ -1276,7 +1288,8 @@ function renderBoards(newKey) {
   setHTML($('#boards'), orderedPlayers().map(p => {
     const li = lineInfo(p.board, calledSet, s.N);
     const pk = picking && p.id === myId();
-    const cells = (p.board || Array(s.N * s.N).fill('')).map((v, i) => {
+    const hidden = s.view === 'mine' && s.phase === 'play' && p.id !== myId(); // 내 판만 보기: 게임 중엔 남의 판을 가림, 끝나면 공개
+    const cells = hidden ? Array.from({ length: s.N * s.N }, () => '<div class="c hid"></div>').join('') : (p.board || Array(s.N * s.N).fill('')).map((v, i) => {
       const k = norm(v), on = k && calledSet.has(k);
       const extra = pk && !on ? ` pk${pickSel === i ? ' sel' : ''}" data-i="${i}` : '';
       return `<div class="c${on ? ' on' : ''}${li.mask.has(i) ? ' ln' : ''}${on && newKey && k === newKey ? ' new' : ''}${extra}" style="--f:${cellF(v, s.N)}">${esc(v)}</div>`;
@@ -1285,7 +1298,7 @@ function renderBoards(newKey) {
     return `<div class="panel${p.id === myId() ? ' me' : ''}${isTurn ? ' turn' : ''}${pk ? ' picking' : ''}" style="--pc:${COLORS[p.color]}">
       <div class="ph">${dkHTML(p.color)}<span class="pn">${esc(p.name)}</span>${p.id === myId() ? '<span class="tg">나</span>' : ''}${p.ai ? '<span>🤖</span>' : ''}${!p.ai && !p.online ? '<span class="tg off">끊김</span>' : ''}
         <span class="ln"><b>${li.count}</b>/${s.L}줄</span></div>
-      <div class="pb"><div class="grid" style="--n:${s.N}">${cells}</div>${p.rank ? `<div class="stamp"><span>${MEDAL(p.rank)} ${p.rank}등</span></div>` : ''}</div>
+      <div class="pb"><div class="grid" style="--n:${s.N}">${cells}</div>${hidden && !p.rank ? '<div class="lockov"><span>🔒 비공개</span></div>' : ''}${p.rank ? `<div class="stamp"><span>${MEDAL(p.rank)} ${p.rank}등</span></div>` : ''}</div>
     </div>`;
   }).join(''));
 }
@@ -1294,7 +1307,7 @@ function renderBar() {
   const cur = s.players[s.turn];
   const last = s.called[s.called.length - 1];
   setHTML($('#lastv'), last != null ? `방금 <b>${esc(last)}</b>` : '');
-  setHTML($('#prule'), `${s.N}×${s.N}·<b style="color:var(--ink);font-weight:normal">${s.L}줄</b> ${s.mode === 'pick' ? '✋직접' : '🎲뽑기'}${s.auto ? ` ⏳${s.iv}초` : ''}`);
+  setHTML($('#prule'), `${s.N}×${s.N}·<b style="color:var(--ink);font-weight:normal">${s.L}줄</b> ${s.mode === 'pick' ? '✋직접' : '🎲뽑기'}${s.view === 'mine' ? ' 🔒' : ''}${s.auto ? ` ⏳${s.iv}초` : ''}`);
   setHTML($('#called'), s.called.length ? `<span class="lab">나온 것 ${s.called.length}</span>` + s.called.slice().reverse().map((v, i) => `<span class="chip${i ? '' : ' now'}">${esc(v)}</span>`).join('') : `<span class="lab">아직 나온 것이 없어요</span>`);
   let html;
   const animating = Date.now() < animUntil, locked = Date.now() < drawLockUntil;
