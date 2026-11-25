@@ -479,6 +479,7 @@ const Snd = {
       // iOS Safari: 터치 안에서 아주 짧은 무음을 재생해야 확실히 소리가 풀림
       const src = this.ctx.createBufferSource(); src.buffer = this.ctx.createBuffer(1, 1, 22050); src.connect(this.ctx.destination); src.start(0);
       this.session();
+      Voice.prime();
     } catch (e) {}
   },
   // 아이폰 무음 스위치가 켜져 있어도 게임 소리가 나도록 (앱의 🔇 버튼으로 끌 수 있음)
@@ -527,6 +528,46 @@ const Snd = {
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Snd.ctx && Snd.ctx.state !== 'running') Snd.run(() => {}); });
 const buzz = p => { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} };
 
+/* ---------- 음성: 줄이 완성되면 "빙고!" (기기에 있는 한국어 음성으로 말함) ---------- */
+const Voice = {
+  ok: 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined',
+  voice: null, ko: true, primed: false,
+  pick() {
+    if (!this.ok) return;
+    let vs = []; try { vs = speechSynthesis.getVoices() || []; } catch (e) {}
+    const ko = vs.filter(v => /^ko/i.test(v.lang || '') || /korean|한국/i.test(v.name || ''));
+    this.voice = ko.find(v => /yuna|유나|sora|google/i.test(v.name)) || ko.find(v => v.localService) || ko[0] || null;
+    this.ko = !!this.voice || !vs.length; // 음성 목록이 아직 없으면 한국어로 시도
+  },
+  prime() { // 아이폰: 처음 한 번은 화면을 누를 때 말하기를 시작해 둬야 나중에 저절로 말할 수 있음
+    if (!this.ok || this.primed) return; this.primed = true;
+    try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; u.lang = 'ko-KR'; speechSynthesis.speak(u); } catch (e) {}
+  },
+  say(text, enText, onend) {
+    if (!this.ok || !Snd.on) return false;
+    try {
+      if (!this.voice) this.pick();
+      const u = new SpeechSynthesisUtterance(this.ko ? text : enText); // 한국어 음성이 없는 기기는 영어 "Bingo!"
+      if (this.ko) { u.lang = 'ko-KR'; if (this.voice) u.voice = this.voice; }
+      u.rate = 1.05; u.pitch = 1.3; u.volume = 1;
+      if (onend) { let done = false; const fin = () => { if (!done) { done = true; onend(); } }; u.onend = fin; u.onerror = fin; setTimeout(fin, 2200); }
+      if (speechSynthesis.paused) speechSynthesis.resume();
+      speechSynthesis.speak(u);
+      return true;
+    } catch (e) { return false; }
+  },
+  stop() { try { this.ok && speechSynthesis.cancel(); } catch (e) {} }
+};
+if (Voice.ok) { Voice.pick(); try { speechSynthesis.addEventListener('voiceschanged', () => Voice.pick()); } catch (e) {} }
+// 새로 완성한 줄 수만큼 "빙고!" (최대 3번), 순위가 정해지면 "1등!"까지
+function bingoWords(n, rank, name) {
+  const k = clamp(n || 1, 1, 3);
+  return {
+    ko: (name ? name + ', ' : '') + Array(k).fill('빙고').join('! ') + '!' + (rank ? ` ${rank}등!` : ''),
+    en: (name ? name + ', ' : '') + Array(k).fill('Bingo').join('! ') + '!'
+  };
+}
+
 /* ---------- 화면 꺼짐 방지 ---------- */
 let wakeLock = null;
 async function keepAwake() {
@@ -574,7 +615,7 @@ const netHTML = () => `<span class="net ${netState !== 'ok' ? 'bad' : ''}"><i></
 const sndBtn = () => `<button class="icon" data-act="sound" aria-label="소리">${Snd.on ? '🔊' : '🔇'}</button>`;
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-act="sound"]'); if (!b) return;
-  Snd.on = !Snd.on; LS.set('kb-sound', Snd.on); Snd.session(); $$('[data-act="sound"]').forEach(x => x.textContent = Snd.on ? '🔊' : '🔇');
+  Snd.on = !Snd.on; LS.set('kb-sound', Snd.on); Snd.session(); if (!Snd.on) Voice.stop(); $$('[data-act="sound"]').forEach(x => x.textContent = Snd.on ? '🔊' : '🔇');
   if (Snd.on) { Snd.unlock(); setTimeout(() => Snd.slap(), 30); }
 });
 
@@ -1608,13 +1649,21 @@ function updPlay(prev) {
     const delay = animating ? 700 : 0;
     s.players.forEach(p => {
       const q = prev.players.find(x => x.id === p.id); if (!q) return;
+      // "빙고!" 음성은 줄을 완성한 사람의 기기에서만 (AI는 호스트 기기에서 이름과 함께)
+      const mine = p.id === myId(), aiHere = p.ai && role === 'host';
+      const w = bingoWords(p.lines - q.lines, p.rank && !q.rank ? p.rank : 0, aiHere ? p.name : '');
       if (p.rank && !q.rank && p.at) {
         setTimeout(() => {
-          toast(`${MEDAL(p.rank)} ${p.name}${p.id === myId() ? '(나)' : ''} 빙고! ${p.rank}등`, 3000);
-          if (p.id === myId()) { Snd.fanfare(); buzz([80, 60, 80, 60, 200]); } else Snd.line();
+          toast(`${MEDAL(p.rank)} ${p.name}${mine ? '(나)' : ''} 빙고! ${p.rank}등`, 3000);
+          if (mine) { buzz([80, 60, 80, 60, 200]); if (!Voice.say(w.ko, w.en, () => Snd.fanfare())) Snd.fanfare(); }
+          else if (aiHere) { if (!Voice.say(w.ko, w.en)) Snd.line(); }
+          else Snd.line();
         }, delay);
-      } else if (p.id === myId() && p.lines > q.lines && !p.rank) {
-        setTimeout(() => { toast(`줄 완성! ${p.lines}/${s.L}줄`); Snd.line(); }, delay);
+      } else if (p.lines > q.lines && !p.rank && (mine || aiHere)) {
+        setTimeout(() => {
+          if (mine) toast(`빙고! ${p.lines}/${s.L}줄`);
+          if (!Voice.say(w.ko, w.en)) Snd.line();
+        }, delay + (mine ? 0 : 400));
       }
     });
     const pc = prev.players[prev.turn], nc = s.players[s.turn];
